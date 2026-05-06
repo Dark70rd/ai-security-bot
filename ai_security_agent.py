@@ -1,0 +1,83 @@
+import subprocess
+import json
+import os
+import sys
+import google.generativeai as genai
+from datetime import datetime
+
+# --- CONFIGURATION ---
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    print("ERROR: GOOGLE_API_KEY not found.")
+    sys.exit(1)
+
+genai.configure(api_key=GOOGLE_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
+
+def run_nuclei_scan(target_url):
+    print(f"[+] Starting Nuclei scan on {target_url}...")
+    cmd = ["nuclei", "-u", target_url, "-jsonl", "-severity", "critical,high", "-silent"]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0 and "error" in result.stderr.lower():
+            print(f"[!] Scan failed: {result.stderr}")
+            return None
+            
+        findings = []
+        for line in result.stdout.splitlines():
+            if line.strip():
+                try:
+                    findings.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        
+        print(f"[+] Scan complete. Found {len(findings)} potential issues.")
+        return findings
+    except Exception as e:
+        print(f"[!] Error: {e}")
+        return None
+
+def analyze_findings_with_ai(findings):
+    if not findings:
+        return "No vulnerabilities found."
+
+    print("[+] Sending findings to AI for analysis...")
+    prompt = f"""
+    You are a senior cybersecurity analyst. Analyze these Nuclei scan findings:
+    {json.dumps(findings, indent=2)}
+    
+    TASK:
+    1. Filter false positives.
+    2. Prioritize by severity.
+    3. Provide a professional Markdown report with Executive Summary, Findings, and Remediation.
+    """
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"AI Analysis Failed: {str(e)}"
+
+def save_report(report_text, target_url):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"report_{target_url.replace('/', '_')}_{timestamp}.md"
+    with open(filename, "w") as f:
+        f.write(report_text)
+    print(f"[+] Report saved to: {filename}")
+    return filename
+
+if __name__ == "__main__":
+    target = os.getenv("TARGET_URL")
+    if not target:
+        if len(sys.argv) < 2:
+            print("Usage: python ai_security_agent.py <target_url>")
+            sys.exit(1)
+        target = sys.argv[1]
+    
+    findings = run_nuclei_scan(target)
+    if not findings:
+        sys.exit(0)
+    
+    report = analyze_findings_with_ai(findings)
+    save_report(report, target)
+    print("\n[+] Process Complete.")
