@@ -1,75 +1,29 @@
-import subprocess
-import json
 import os
 import sys
-import google.generativeai as genai
+import json
+import subprocess
+import glob
 from datetime import datetime
+import google.generativeai as genai
 
-# --- CONFIGURATION ---
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    print("ERROR: GOOGLE_API_KEY not found.")
+# Configure API Key
+api_key = os.getenv("GOOGLE_API_KEY")
+if not api_key:
+    print("Error: GOOGLE_API_KEY not set.")
     sys.exit(1)
 
-genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+genai.configure(api_key=api_key)
+model = genai.GenerativeModel('gemini-pro')
 
-def run_nuclei_scan(target_url):
-    print(f"[+] Starting Nuclei scan on {target_url}...")
-    cmd = ["nuclei", "-u", target_url, "-jsonl", "-severity", "critical,high", "-silent"]
-    
+def read_file_safe(filename):
+    """Safely read a file and return content, or empty string if not found."""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0 and "error" in result.stderr.lower():
-            print(f"[!] Scan failed: {result.stderr}")
-            return None
-            
-        findings = []
-        for line in result.stdout.splitlines():
-            if line.strip():
-                try:
-                    findings.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        
-        print(f"[+] Scan complete. Found {len(findings)} potential issues.")
-        return findings
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read()
     except Exception as e:
-        print(f"[!] Error: {e}")
-        return None
-
-def analyze_findings_with_ai(findings):
-    if not findings:
-        return "No vulnerabilities found."
-
-    print("[+] Sending findings to AI for analysis...")
-    prompt = f"""
-    You are a senior cybersecurity analyst. Analyze these Nuclei scan findings:
-    {json.dumps(findings, indent=2)}
-    
-    TASK:
-    1. Filter false positives.
-    2. Prioritize by severity.
-    3. Provide a professional Markdown report with Executive Summary, Findings, and Remediation.
-    """
-    try:
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"AI Analysis Failed: {str(e)}"
-
-def save_report(report, target_url):
-    # Sanitize the URL to create a valid filename
-    # Replace : / \ with _ to avoid filesystem errors
-    safe_name = target_url.replace(":", "_").replace("/", "_").replace("\\", "_")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"report_{safe_name}_{timestamp}.md"
-    
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(report)
-    
-    print(f"[+] Report saved to: {filename}")
-    return filename
+        print(f"Error reading {filename}: {e}")
+    return ""
 
 if __name__ == "__main__":
     target = os.getenv("TARGET_URL")
@@ -79,42 +33,82 @@ if __name__ == "__main__":
             sys.exit(1)
         target = sys.argv[1]
     
-    findings = run_nuclei_scan(target)
+    print(f"[+] Processing scan results for: {target}")
     
-    # ALWAYS generate a report, even if empty
-    if not findings:
-        print("[+] No vulnerabilities found. Generating 'All Clear' report...")
+    # Read outputs from the workflow steps
+    nmap_out = read_file_safe("nmap_results.txt")
+    nuclei_out = read_file_safe("nuclei_results.txt")
+    sqlmap_out = read_file_safe("sqlmap_results.txt")
+    
+    # Combine findings
+    all_findings = f"""
+    === NMAP RESULTS ===
+    {nmap_out if nmap_out.strip() else "No ports scanned or no results."}
+    
+    === NUCLEI RESULTS ===
+    {nuclei_out if nuclei_out.strip() else "No vulnerabilities found by Nuclei."}
+    
+    === SQLMAP RESULTS ===
+    {sqlmap_out if sqlmap_out.strip() else "No SQL injection found or scan timed out."}
+    """
+    
+    # Check if we have ANY data
+    if not (nmap_out.strip() or nuclei_out.strip() or sqlmap_out.strip()):
+        print("[+] No data found from any scanner. Generating 'All Clear' report.")
         report = f"""# Security Scan Report
 
 **Target:** {target}
 **Date:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-**Status:** ✅ **CLEAN**
+**Status:** ⚠️ **NO DATA**
 
 ## Executive Summary
-No critical or high-severity vulnerabilities were detected by Nuclei scanner.
+The automated scanners (Nmap, Nuclei, SQLMap) did not produce any output. This could mean:
+1. The target is unreachable.
+2. The target blocked the scan (WAF/Firewall).
+3. The scan timed out.
 
-## Conclusion
-The target appears secure against the tested templates. However, regular scanning is recommended as new vulnerabilities are discovered daily.
+## Recommendation
+Please verify the target URL and network connectivity. Try running the scan again.
 
 ---
 *Generated by Hades-Sec-Bot*
 """
     else:
-        print("[+] Sending findings to AI for analysis...")
+        print("[+] Sending combined findings to AI for analysis...")
         prompt = f"""
-        You are a senior cybersecurity analyst. Analyze these Nuclei scan findings:
-        {json.dumps(findings, indent=2)}
+        You are a senior cybersecurity analyst and penetration tester.
+        Analyze the following raw output from three security tools: Nmap, Nuclei, and SQLMap.
+        
+        RAW DATA:
+        {all_findings}
         
         TASK:
-        1. Filter false positives.
-        2. Prioritize by severity.
-        3. Provide a professional Markdown report with Executive Summary, Findings, and Remediation.
+        1. **Filter False Positives**: Ignore generic "info" messages or obvious false alarms. Focus on actionable vulnerabilities.
+        2. **Correlate**: If Nmap shows port 80 open and Nuclei finds a vulnerability on port 80, link them.
+        3. **Prioritize**: Rank findings by severity (Critical > High > Medium > Low).
+        4. **Format**: Create a professional Markdown report with:
+           - Executive Summary
+           - Critical/High Findings (with Proof of Concept if available)
+           - Medium/Low Findings
+           - Remediation Steps
+           - Conclusion
+        
+        If no vulnerabilities are found despite the scans, state that clearly as "No Vulnerabilities Detected".
         """
+        
         try:
             response = model.generate_content(prompt)
             report = response.text
         except Exception as e:
-            report = f"AI Analysis Failed: {str(e)}\n\nRaw Findings:\n{json.dumps(findings, indent=2)}"
+            report = f"AI Analysis Failed: {str(e)}\n\nRaw Findings:\n{all_findings}"
 
-    save_report(report, target)
+    # Save Report
+    safe_name = target.replace(":", "_").replace("/", "_").replace("\\", "_")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"report_{safe_name}_{timestamp}.md"
+    
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(report)
+    
+    print(f"[+] Report saved to: {filename}")
     print("\n[+] Process Complete.")

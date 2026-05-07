@@ -6,11 +6,16 @@ on:
       target_url:
         description: 'Target URL to scan'
         required: true
-        type: string
+        default: 'https://testphp.vulnweb.com'
+
+env:
+  TARGET_URL: ${{ github.event.inputs.target_url }}
+  GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
 
 jobs:
   scan-and-analyze:
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -20,32 +25,76 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Dependencies
+      - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install google-generativeai
 
-      - name: Install Nuclei
+      - name: Install Security Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget unzip
-          # Download a specific stable version of Nuclei
+          sudo apt-get install -y wget unzip curl nmap git
+          
+          # Install Nuclei (Specific Version)
           wget https://github.com/projectdiscovery/nuclei/releases/download/v3.3.1/nuclei_3.3.1_linux_amd64.zip
           unzip nuclei_3.3.1_linux_amd64.zip
           sudo mv nuclei /usr/local/bin/
-          nuclei -version
+          
+          # Install sqlmap
+          git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /tmp/sqlmap
+          sudo mv /tmp/sqlmap /usr/share/sqlmap
+          sudo ln -sf /usr/share/sqlmap/sqlmap.py /usr/local/bin/sqlmap
 
-      - name: Run Scan
-        env:
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          TARGET_URL: ${{ github.event.inputs.target_url }}
+      - name: Run Nmap Port Scan
         run: |
-          echo "Scanning $TARGET_URL..."
+          echo "[+] Running Nmap on $TARGET_URL..."
+          # Extract hostname from URL
+          HOST=$(echo $TARGET_URL | sed -n 's|^.*//\([^/:]*\).*|\1|p')
+          echo "Target Host: $HOST"
+          
+          # Run quick TCP scan on top 1000 ports
+          nmap -T4 -p- --open $HOST > nmap_results.txt 2>&1 || true
+          cat nmap_results.txt
+          echo "NMAP_RESULTS<<EOF" >> $GITHUB_ENV
+          cat nmap_results.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Run Nuclei Scan (Aggressive)
+        run: |
+          echo "[+] Running Nuclei on $TARGET_URL..."
+          # Run with critical, high, medium severity and vuln tags
+          # -json output for easier parsing later if needed
+          nuclei -u $TARGET_URL -severity critical,high,medium -tags vuln -o nuclei_results.txt -json 2>&1 || true
+          cat nuclei_results.txt
+          echo "NUCLEI_RESULTS<<EOF" >> $GITHUB_ENV
+          cat nuclei_results.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Run SQLMap Scan
+        run: |
+          echo "[+] Running SQLMap on $TARGET_URL..."
+          # Non-interactive mode, aggressive, check for SQLi
+          # --batch: accept defaults, --level 3: deeper check, --risk 2: higher risk tests
+          # Timeout set to 120s to prevent hanging the workflow
+          timeout 120 sqlmap -u "$TARGET_URL" --batch --level=3 --risk=2 --output-dir=/tmp/sqlmap_output 2>&1 || true
+          
+          # Collect results if any
+          if [ -d "/tmp/sqlmap_output" ]; then
+             find /tmp/sqlmap_output -name "*.txt" -exec cat {} \; > sqlmap_results.txt 2>/dev/null || true
+          fi
+          cat sqlmap_results.txt 2>/dev/null || echo "No SQLMap results found."
+          echo "SQLMAP_RESULTS<<EOF" >> $GITHUB_ENV
+          cat sqlmap_results.txt >> $GITHUB_ENV 2>/dev/null || echo "No SQLMap results" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Run AI Analysis
+        run: |
+          echo "[+] Sending combined findings to AI..."
           python ai_security_agent.py "$TARGET_URL"
 
       - name: Upload Report
         uses: actions/upload-artifact@v4
         with:
-          name: report-${{ github.run_id }}
+          name: security-report-${{ github.run_id }}
           path: report_*.md
           retention-days: 1
