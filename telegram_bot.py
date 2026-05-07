@@ -13,7 +13,7 @@ REPO_NAME = os.getenv("REPO_NAME")
 WORKFLOW_FILE = os.getenv("WORKFLOW_FILE", "security-scan.yml")
 
 if not all([TELEGRAM_TOKEN, GITHUB_TOKEN, REPO_OWNER, REPO_NAME]):
-    raise ValueError("Missing environment variables!")
+    raise ValueError("Missing required environment variables: TELEGRAM_TOKEN, GITHUB_TOKEN, REPO_OWNER, REPO_NAME")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)

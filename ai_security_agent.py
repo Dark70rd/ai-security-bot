@@ -24,8 +24,8 @@ def configure_api():
     
     genai.configure(api_key=api_key)
     
-    # Updated to current 2026 stable models
-    model_name = "gemini-3.1-flash"
+    # Use current stable models (2026)
+    model_name = "gemini-1.5-flash"
     
     try:
         model = genai.GenerativeModel(model_name)
@@ -33,8 +33,8 @@ def configure_api():
         return model
     except Exception as e:
         print(f"[ERROR] Failed to initialize model '{model_name}': {e}")
-        # Fallback to the Pro version if Flash is unavailable
-        fallback_models = ["gemini-3.1-pro", "gemini-3.0-flash"]
+        # Fallback to alternative models if primary fails
+        fallback_models = ["gemini-1.5-pro", "gemini-2.0-flash"]
         for fallback in fallback_models:
             try:
                 print(f"[+] Trying fallback model: {fallback}...")
