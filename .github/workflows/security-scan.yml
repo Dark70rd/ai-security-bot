@@ -52,76 +52,125 @@ jobs:
           echo "[+] Running Fast Nmap on $TARGET_URL..."
           HOST=$(echo $TARGET_URL | sed -n 's|^.*//\([^/:]*\).*|\1|p')
           echo "Target Host: $HOST"
-          
+
           # -Pn: Skip ping (firewalls often block ICMP)
           # -T4: Aggressive timing
           # -p 80,443: Only web ports
           # --version-intensity 1: Fast service detection
-          nmap -Pn -T4 -p 80,443 --version-intensity 1 $HOST > nmap_results.txt 2>&1 || true
-          
+          nmap -Pn -T4 -p 80,443 --version-intensity 1 -oN nmap_output.txt $HOST > nmap_results.txt 2>&1 || true
+
+          # Format results for better AI analysis
+          echo "=== NMAP SECURITY SCAN RESULTS ===" > nmap_formatted.txt
+          echo "Target: $TARGET_URL ($HOST)" >> nmap_formatted.txt
+          echo "Scan Time: $(date)" >> nmap_formatted.txt
+          echo "" >> nmap_formatted.txt
+          echo "RAW OUTPUT:" >> nmap_formatted.txt
+          cat nmap_output.txt >> nmap_formatted.txt 2>/dev/null || echo "Nmap scan failed or produced no output" >> nmap_formatted.txt
+          echo "" >> nmap_formatted.txt
+          echo "ANALYSIS:" >> nmap_formatted.txt
+
+          # Basic analysis
+          if grep -q "80/tcp.*open" nmap_output.txt 2>/dev/null; then
+            echo "- Port 80 (HTTP) is OPEN" >> nmap_formatted.txt
+          elif grep -q "80/tcp.*filtered" nmap_output.txt 2>/dev/null; then
+            echo "- Port 80 (HTTP) is FILTERED (firewall detected)" >> nmap_formatted.txt
+          fi
+
+          if grep -q "443/tcp.*open" nmap_output.txt 2>/dev/null; then
+            echo "- Port 443 (HTTPS) is OPEN" >> nmap_formatted.txt
+          elif grep -q "443/tcp.*filtered" nmap_output.txt 2>/dev/null; then
+            echo "- Port 443 (HTTPS) is FILTERED (firewall detected)" >> nmap_formatted.txt
+          fi
+
           echo "--- Nmap Results ---"
-          cat nmap_results.txt
+          cat nmap_formatted.txt
           echo "-------------------"
-          
+
           # Ensure we always write to GITHUB_ENV even if nmap fails
           echo "NMAP_RESULTS<<EOF" >> $GITHUB_ENV
-          cat nmap_results.txt >> $GITHUB_ENV
+          cat nmap_formatted.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
       - name: Run Nuclei Scan (Fixed Connectivity & Headers)
         run: |
           echo "[+] Running Nuclei with connectivity fixes..."
-          
+
           # Extract base URL without protocol for dynamic switching
           BASE_URL=$(echo $TARGET_URL | sed -e 's|^[^:]*://||')
-          
+
           # Try HTTP first (often less blocked than HTTPS on test sites)
           echo "[+] Attempting scan via HTTP..."
           nuclei -u "http://${BASE_URL}" \
             -severity critical,high,medium \
             -tags vuln,tech-detect \
-            -o nuclei_results.txt \
+            -o nuclei_raw.txt \
             -timeout 60 \
             -retries 2 \
             -no-interactsh \
             -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
             2>&1 || true
-          
+
           # Check if we got results. If empty or "No results", try HTTPS
-          if [ ! -s nuclei_results.txt ] || grep -q "No results found" nuclei_results.txt; then
+          if [ ! -s nuclei_raw.txt ] || grep -q "No results found" nuclei_raw.txt; then
              echo "[+] HTTP scan empty or failed, trying HTTPS..."
              nuclei -u "https://${BASE_URL}" \
                -severity critical,high,medium \
                -tags vuln,tech-detect \
-               -o nuclei_results.txt \
+               -o nuclei_raw.txt \
                -timeout 60 \
                -retries 2 \
                -no-interactsh \
                -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
                2>&1 || true
           fi
-          
-          # Ensure file exists
-          if [ ! -f nuclei_results.txt ]; then 
-            echo "No Nuclei results file created. Creating empty placeholder."
-            touch nuclei_results.txt
+
+          # Format results for better AI analysis
+          echo "=== NUCLEI VULNERABILITY SCAN RESULTS ===" > nuclei_formatted.txt
+          echo "Target: $TARGET_URL" >> nuclei_formatted.txt
+          echo "Scan Time: $(date)" >> nuclei_formatted.txt
+          echo "Protocol Attempts: HTTP, HTTPS" >> nuclei_formatted.txt
+          echo "" >> nuclei_formatted.txt
+          echo "RAW OUTPUT:" >> nuclei_formatted.txt
+          if [ -f nuclei_raw.txt ]; then
+            cat nuclei_raw.txt >> nuclei_formatted.txt
+          else
+            echo "No nuclei output file generated" >> nuclei_formatted.txt
           fi
-          
+          echo "" >> nuclei_formatted.txt
+          echo "ANALYSIS:" >> nuclei_formatted.txt
+
+          # Basic analysis
+          if [ -f nuclei_raw.txt ] && grep -q "\[.*\]" nuclei_raw.txt; then
+            VULN_COUNT=$(grep -c "\[.*\]" nuclei_raw.txt)
+            echo "- Found $VULN_COUNT potential security issues" >> nuclei_formatted.txt
+            echo "- Review raw output for severity levels and details" >> nuclei_formatted.txt
+          elif [ -f nuclei_raw.txt ] && grep -q "No results found" nuclei_raw.txt; then
+            echo "- No vulnerabilities detected by Nuclei templates" >> nuclei_formatted.txt
+          else
+            echo "- Scan completed but no clear results obtained" >> nuclei_formatted.txt
+          fi
+
+          # Ensure file exists
+          if [ ! -f nuclei_formatted.txt ]; then
+            echo "=== NUCLEI SCAN RESULTS ===" > nuclei_formatted.txt
+            echo "Scan failed to complete properly" >> nuclei_formatted.txt
+          fi
+
           echo "--- Nuclei Results ---"
-          cat nuclei_results.txt
+          cat nuclei_formatted.txt
           echo "----------------------"
-          
+
           echo "NUCLEI_RESULTS<<EOF" >> $GITHUB_ENV
-          cat nuclei_results.txt >> $GITHUB_ENV
+          cat nuclei_formatted.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
       - name: Run SQLMap Scan (Fixed Connectivity & Random Agent)
         run: |
           echo "[+] Running SQLMap with connectivity fixes..."
-          
+
           BASE_URL=$(echo $TARGET_URL | sed -e 's|^[^:]*://||')
           SQLMAP_OUTPUT="/tmp/sqlmap_raw_output.txt"
-          
+
           # Try HTTP first
           echo "[+] Attempting SQLMap via HTTP..."
           timeout 300 sqlmap -u "http://${BASE_URL}" \
@@ -134,7 +183,7 @@ jobs:
             --delay=2 \
             --output-dir=/tmp/sqlmap_output \
             > "$SQLMAP_OUTPUT" 2>&1 || true
-          
+
           # Check if we got meaningful output (looking for "testing parameters" or similar)
           if ! grep -q "testing parameters\|injectable\|GET parameter" "$SQLMAP_OUTPUT" 2>/dev/null; then
              echo "[+] HTTP scan failed or found nothing, trying HTTPS..."
@@ -149,22 +198,45 @@ jobs:
                --output-dir=/tmp/sqlmap_output \
                > "$SQLMAP_OUTPUT" 2>&1 || true
           fi
-          
-          # Ensure we always write to GITHUB_ENV
+
+          # Format results for better AI analysis
+          echo "=== SQLMAP SQL INJECTION TEST RESULTS ===" > sqlmap_formatted.txt
+          echo "Target: $TARGET_URL" >> sqlmap_formatted.txt
+          echo "Scan Time: $(date)" >> sqlmap_formatted.txt
+          echo "Protocol Attempts: HTTP, HTTPS" >> sqlmap_formatted.txt
+          echo "Test Level: 2 (Basic injection tests)" >> sqlmap_formatted.txt
+          echo "Risk Level: 1 (Low risk tests only)" >> sqlmap_formatted.txt
+          echo "" >> sqlmap_formatted.txt
+          echo "RAW OUTPUT:" >> sqlmap_formatted.txt
           if [ -s "$SQLMAP_OUTPUT" ]; then
-            echo "--- SQLMap Results ---"
-            cat "$SQLMAP_OUTPUT"
-            echo "----------------------"
-            
-            echo "SQLMAP_RESULTS<<EOF" >> $GITHUB_ENV
-            cat "$SQLMAP_OUTPUT" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
+            cat "$SQLMAP_OUTPUT" >> sqlmap_formatted.txt
           else
-            echo "No SQLMap results found or scan timed out."
-            echo "SQLMAP_RESULTS<<EOF" >> $GITHUB_ENV
-            echo "Scan failed to connect or produced no output." >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
+            echo "SQLMap scan failed or produced no output" >> sqlmap_formatted.txt
           fi
+          echo "" >> sqlmap_formatted.txt
+          echo "ANALYSIS:" >> sqlmap_formatted.txt
+
+          # Basic analysis
+          if grep -q "injectable" "$SQLMAP_OUTPUT" 2>/dev/null; then
+            echo "- SQL INJECTION VULNERABILITY DETECTED" >> sqlmap_formatted.txt
+            echo "- Review raw output for specific injection points" >> sqlmap_formatted.txt
+          elif grep -q "testing parameters" "$SQLMAP_OUTPUT" 2>/dev/null; then
+            echo "- SQLMap successfully tested parameters" >> sqlmap_formatted.txt
+            echo "- No injection vulnerabilities found in tested parameters" >> sqlmap_formatted.txt
+          elif grep -q "connection failed\|unreachable" "$SQLMAP_OUTPUT" 2>/dev/null; then
+            echo "- Connection issues prevented complete testing" >> sqlmap_formatted.txt
+          else
+            echo "- Scan completed but results unclear" >> sqlmap_formatted.txt
+          fi
+
+          # Ensure we always write to GITHUB_ENV
+          echo "--- SQLMap Results ---"
+          cat sqlmap_formatted.txt
+          echo "----------------------"
+
+          echo "SQLMAP_RESULTS<<EOF" >> $GITHUB_ENV
+          cat sqlmap_formatted.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Run AI Analysis
         run: |

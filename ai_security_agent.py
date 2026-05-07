@@ -20,6 +20,13 @@ except ImportError:
         os.system("pip install google-genai")
         import google.genai as genai
 
+# Import OpenAI as alternative
+try:
+    import openai
+except ImportError:
+    print("[WARN] OpenAI package not available. Only Google Gemini will be used.")
+    openai = None
+
 def configure_api():
     """Configure the API key and model."""
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -51,6 +58,141 @@ def configure_api():
         
         raise RuntimeError("All model initialization attempts failed.")
 
+def analyze_with_openai(target_url, nmap_results, nuclei_results, sqlmap_results):
+    """Fallback analysis using OpenAI when Google quota is exceeded."""
+
+    if not openai:
+        print("[ERROR] OpenAI library not available")
+        return None
+
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        print("[WARN] OPENAI_API_KEY not set, skipping OpenAI fallback")
+        return None
+
+    try:
+        client = openai.OpenAI(api_key=openai_key)
+
+        prompt = f"""You are a cybersecurity analyst. Analyze these security scan results for {target_url}.
+
+SCAN RESULTS:
+==========
+NMAP PORT SCAN:
+{nmap_results}
+
+NUCLEI VULNERABILITY SCAN:
+{nuclei_results}
+
+SQLMAP INJECTION TEST:
+{sqlmap_results}
+==========
+
+Create a professional security report with:
+1. Executive Summary (2-3 sentences)
+2. Key Findings by severity (Critical/High/Medium/Low)
+3. Network Analysis (port status, firewall detection)
+4. Recommendations
+
+Be concise but thorough. Focus on actionable insights."""
+
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=2000,
+            temperature=0.3
+        )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
+        print(f"[ERROR] OpenAI fallback failed: {e}")
+        return None
+
+def generate_fallback_report(target_url, nmap_results, nuclei_results, sqlmap_results):
+    """Generate a basic security report when AI analysis is unavailable."""
+
+    # Basic analysis functions
+    def analyze_nmap(output):
+        findings = []
+        if "filtered" in output.lower():
+            findings.append("🔥 **Firewall Detected** - Ports are being filtered, indicating active network protection")
+        if "open" in output.lower():
+            findings.append("⚠️ **Open Ports Found** - Review port exposure and running services")
+        if "80/tcp" in output or "443/tcp" in output:
+            findings.append("ℹ️ **Web Services Detected** - HTTP/HTTPS ports are accessible")
+        return findings
+
+    def analyze_nuclei(output):
+        findings = []
+        if "no results found" in output.lower() or len(output.strip()) < 50:
+            findings.append("✅ **No Critical Vulnerabilities** - Nuclei scan completed with no findings")
+        else:
+            findings.append("⚠️ **Potential Vulnerabilities** - Review Nuclei output for specific issues")
+        return findings
+
+    def analyze_sqlmap(output):
+        findings = []
+        if "no injection" in output.lower() or "not injectable" in output.lower():
+            findings.append("✅ **No SQL Injection** - SQLMap found no injection vulnerabilities")
+        elif "injectable" in output.lower():
+            findings.append("🔥 **SQL Injection Risk** - Potential SQL injection vulnerabilities detected")
+        else:
+            findings.append("⚠️ **SQL Injection Test Completed** - Review output for injection attempts")
+        return findings
+
+    # Generate report
+    report = f"""# Security Scan Report - {target_url}
+
+## ⚠️ AI Analysis Unavailable (Quota Exceeded)
+
+Due to API quota limitations, automated AI analysis is currently unavailable. Below is a basic automated analysis of the scan results.
+
+## Executive Summary
+
+Automated security scan completed for {target_url}. Manual review of raw scan data is recommended for comprehensive analysis.
+
+## Scan Results Analysis
+
+### 🔍 Network Analysis (Nmap)
+{chr(10).join(f"- {finding}" for finding in analyze_nmap(nmap_results))}
+
+### 🛡️ Vulnerability Assessment (Nuclei)
+{chr(10).join(f"- {finding}" for finding in analyze_nuclei(nuclei_results))}
+
+### 💉 SQL Injection Testing (SQLMap)
+{chr(10).join(f"- {finding}" for finding in analyze_sqlmap(sqlmap_results))}
+
+## Recommendations
+
+1. **Review Raw Data** - Examine the complete scan outputs below for detailed findings
+2. **Manual Verification** - Perform manual testing to validate automated results
+3. **Quota Management** - Consider upgrading your Google Gemini API plan for unlimited analysis
+4. **Alternative AI Services** - Consider using OpenAI, Anthropic, or other AI providers
+
+## Raw Scan Data
+
+### Nmap Results
+```
+{nmap_results}
+```
+
+### Nuclei Results
+```
+{nuclei_results}
+```
+
+### SQLMap Results
+```
+{sqlmap_results}
+```
+
+---
+*Report generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*
+*Analysis: Basic automated parsing (AI quota exceeded)*
+"""
+
+    return report
+
 def sanitize_input(text):
     """Sanitize input text to prevent prompt injection or formatting issues."""
     if not text:
@@ -63,73 +205,84 @@ def sanitize_input(text):
     return text
 
 def analyze_findings(model, target_url, nmap_results, nuclei_results, sqlmap_results):
-    """Send scan results to the AI for analysis."""
-    
+    """Send scan results to the AI for analysis with quota management."""
+
     # Sanitize inputs BEFORE constructing the prompt
     safe_nmap = sanitize_input(nmap_results)
     safe_nuclei = sanitize_input(nuclei_results)
     safe_sqlmap = sanitize_input(sqlmap_results)
-    
-    prompt = f"""
-    You are an expert Cybersecurity Analyst. Your task is to analyze the provided security scan results 
-    for the target: {target_url}.
-    
-    The scans performed were:
-    1. Nmap (Port Scanning & Service Detection)
-    2. Nuclei (Vulnerability Scanning)
-    3. SQLMap (SQL Injection Testing)
-    
-    RAW DATA:
-    ---
-    [NMAP OUTPUT]
-    {safe_nmap}
-    
-    [NUCLEI OUTPUT]
-    {safe_nuclei}
-    
-    [SQLMAP OUTPUT]
-    {safe_sqlmap}
-    ---
-    
-    INSTRUCTIONS:
-    1. Create a professional Markdown security report.
-    2. Include an Executive Summary.
-    3. Detail findings by tool (Nmap, Nuclei, SQLMap).
-    4. If vulnerabilities are found, categorize them by severity (Critical, High, Medium, Low).
-    5. If NO vulnerabilities are found, explicitly state "No Vulnerabilities Detected" but also analyze 
-       the network behavior (e.g., "Ports filtered suggests active firewall").
-    6. Provide actionable remediation steps.
-    7. Keep the tone professional and technical.
-    
-    Generate the report now.
-    """
 
-    try:
-        print("[+] Sending findings to AI for analysis...")
-        
-        # Generate content using the current SDK
-        response = model.generate_content(prompt)
-        
-        if not response or not response.text:
-            raise ValueError("AI returned empty response.")
-            
-        return response.text
+    # Create a more structured and concise prompt
+    prompt = f"""You are a cybersecurity analyst. Analyze these security scan results for {target_url}.
 
-    except Exception as e:
-        print(f"[ERROR] AI Analysis Failed: {e}")
-        return f"""
-        # Security Scan Report
-        
-        ## ⚠️ AI Analysis Failed
-        
-        The automated analysis could not be completed due to an error:
-        `{str(e)}`
-        
-        ### Raw Findings Available:
-        - **Nmap:** {len(safe_nmap)} characters
-        - **Nuclei:** {len(safe_nuclei)} characters
-        - **SQLMap:** {len(safe_sqlmap)} characters
-        """
+SCAN RESULTS:
+==========
+NMAP PORT SCAN:
+{safe_nmap}
+
+NUCLEI VULNERABILITY SCAN:
+{safe_nuclei}
+
+SQLMAP INJECTION TEST:
+{safe_sqlmap}
+==========
+
+Create a professional security report with:
+1. Executive Summary (2-3 sentences)
+2. Key Findings by severity (Critical/High/Medium/Low)
+3. Network Analysis (port status, firewall detection)
+4. Recommendations
+
+Be concise but thorough. Focus on actionable insights."""
+
+    # Try AI analysis with quota management
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            print(f"[+] Attempting AI analysis (attempt {attempt + 1}/{max_retries})...")
+
+            # Generate content using the current SDK
+            response = model.generate_content(prompt)
+
+            if not response or not response.text:
+                raise ValueError("AI returned empty response.")
+
+            return response.text
+
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            # Check for quota exceeded errors
+            if "quota" in error_msg or "429" in error_msg or "rate limit" in error_msg:
+                if attempt < max_retries - 1:
+                    wait_time = 30 * (attempt + 1)  # Progressive backoff: 30s, 60s, 90s
+                    print(f"[WARN] Quota exceeded. Retrying in {wait_time} seconds...")
+                    import time
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print("[WARN] Google quota exceeded after retries. Trying OpenAI fallback...")
+                    openai_result = analyze_with_openai(target_url, safe_nmap, safe_nuclei, safe_sqlmap)
+                    if openai_result:
+                        print("[+] OpenAI fallback successful!")
+                        return openai_result
+                    else:
+                        print("[ERROR] OpenAI fallback also failed. Using basic analysis.")
+                        return generate_fallback_report(target_url, safe_nmap, safe_nuclei, safe_sqlmap)
+            else:
+                # Other errors - try OpenAI fallback immediately
+                print(f"[ERROR] Google AI failed: {e}")
+                print("[WARN] Trying OpenAI fallback...")
+                openai_result = analyze_with_openai(target_url, safe_nmap, safe_nuclei, safe_sqlmap)
+                if openai_result:
+                    print("[+] OpenAI fallback successful!")
+                    return openai_result
+                else:
+                    print("[ERROR] OpenAI fallback failed. Using basic analysis.")
+                    return generate_fallback_report(target_url, safe_nmap, safe_nuclei, safe_sqlmap)
+
+    # This should never be reached, but just in case
+    return generate_fallback_report(target_url, safe_nmap, safe_nuclei, safe_sqlmap)
 
 def main():
     if len(sys.argv) < 2:
