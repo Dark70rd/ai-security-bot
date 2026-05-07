@@ -1,114 +1,180 @@
+#!/usr/bin/env python3
+"""
+AI Security Agent
+Analyzes raw scan results from Nmap, Nuclei, and SQLMap using Google Gemini.
+"""
+
 import os
 import sys
 import json
-import subprocess
-import glob
 from datetime import datetime
-import google.generativeai as genai
 
-# Configure API Key
-api_key = os.getenv("GOOGLE_API_KEY")
-if not api_key:
-    print("Error: GOOGLE_API_KEY not set.")
-    sys.exit(1)
+# Import the Google Generative AI library
+# Note: Even though google.generativeai is deprecated, it is the package installed in the workflow.
+# We will use it to interface with the new model names.
+try:
+    import google.generativeai as genai
+except ImportError:
+    print("[ERROR] google-generativeai package not found. Installing...")
+    os.system("pip install google-generativeai")
+    import google.generativeai as genai
 
-genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-pro')
-
-def read_file_safe(filename):
-    """Safely read a file and return content, or empty string if not found."""
+def configure_api():
+    """Configure the API key and model."""
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY environment variable is not set.")
+    
+    genai.configure(api_key=api_key)
+    
+    # Use the latest stable model
+    # gemini-1.5-flash is fast, cost-effective, and supports large context windows
+    model_name = "gemini-1.5-flash"
+    
     try:
-        if os.path.exists(filename):
-            with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
-                return f.read()
+        model = genai.GenerativeModel(model_name)
+        print(f"[+] Successfully initialized model: {model_name}")
+        return model
     except Exception as e:
-        print(f"Error reading {filename}: {e}")
-    return ""
+        print(f"[ERROR] Failed to initialize model '{model_name}': {e}")
+        # Fallback to another model if the primary one fails
+        fallback_models = ["gemini-1.5-pro", "gemini-1.0-pro"]
+        for fallback in fallback_models:
+            try:
+                print(f"[+] Trying fallback model: {fallback}...")
+                model = genai.GenerativeModel(fallback)
+                print(f"[+] Successfully initialized fallback model: {fallback}")
+                return model
+            except Exception as fb_err:
+                print(f"[ERROR] Fallback '{fallback}' also failed: {fb_err}")
+        
+        raise RuntimeError("All model initialization attempts failed.")
+
+def sanitize_input(text):
+    """Sanitize input text to prevent prompt injection or formatting issues."""
+    if not text:
+        return "No data provided."
+    # Truncate extremely long inputs to stay within token limits if necessary
+    # Gemini 1.5 Flash supports up to 1M tokens, but we keep it reasonable for speed
+    max_tokens_approx = 100000 # ~100k chars roughly
+    if len(text) > max_tokens_approx:
+        print(f"[WARN] Input truncated from {len(text)} to {max_tokens_approx} characters.")
+        return text[:max_tokens_approx] + "\n... [TRUNCATED] ..."
+    return text
+
+def analyze_findings(model, target_url, nmap_results, nuclei_results, sqlmap_results):
+    """Send scan results to the AI for analysis."""
+    
+    prompt = f"""
+    You are an expert Cybersecurity Analyst. Your task is to analyze the provided security scan results 
+    for the target: {target_url}.
+    
+    The scans performed were:
+    1. Nmap (Port Scanning & Service Detection)
+    2. Nuclei (Vulnerability Scanning)
+    3. SQLMap (SQL Injection Testing)
+    
+    Below are the raw outputs. Some scans may have failed to connect or found no vulnerabilities.
+    Analyze the data critically. If a scan failed due to network issues (e.g., "filtered", "connection refused"), 
+    highlight this as a potential WAF/Firewall presence or network configuration issue, not necessarily a secure system.
+    
+    RAW DATA:
+    ---
+    [NMAP OUTPUT]
+    {nmap_results}
+    
+    [NUCLEI OUTPUT]
+    {nuclei_results}
+    
+    [SQLMAP OUTPUT]
+    {sqlmap_results}
+    ---
+    
+    INSTRUCTIONS:
+    1. Create a professional Markdown security report.
+    2. Include an Executive Summary.
+    3. Detail findings by tool (Nmap, Nuclei, SQLMap).
+    4. If vulnerabilities are found, categorize them by severity (Critical, High, Medium, Low).
+    5. If NO vulnerabilities are found, explicitly state "No Vulnerabilities Detected" but also analyze 
+       the network behavior (e.g., "Ports filtered suggests active firewall").
+    6. Provide actionable remediation steps.
+    7. Keep the tone professional and technical.
+    
+    Generate the report now.
+    """
+
+    try:
+        print("[+] Sending findings to AI for analysis...")
+        
+        # Sanitize inputs
+        safe_nmap = sanitize_input(nmap_results)
+        safe_nuclei = sanitize_input(nuclei_results)
+        safe_sqlmap = sanitize_input(sqlmap_results)
+        
+        # Generate content
+        response = model.generate_content(prompt)
+        
+        if not response or not response.text:
+            raise ValueError("AI returned empty response.")
+            
+        return response.text
+
+    except Exception as e:
+        print(f"[ERROR] AI Analysis Failed: {e}")
+        # Return a fallback error message so the workflow doesn't crash completely
+        return f"""
+        # Security Scan Report
+        
+        ## ⚠️ AI Analysis Failed
+        
+        The automated analysis could not be completed due to an error:
+        `{str(e)}`
+        
+        ### Raw Findings Available:
+        - **Nmap:** {len(safe_nmap)} characters
+        - **Nuclei:** {len(safe_nuclei)} characters
+        - **SQLMap:** {len(safe_sqlmap)} characters
+        
+        Please review the raw logs manually.
+        """
+
+def main():
+    if len(sys.argv) < 2:
+        print("[ERROR] Target URL not provided.")
+        print("Usage: python ai_security_agent.py <target_url>")
+        sys.exit(1)
+
+    target_url = sys.argv[1]
+    
+    # Retrieve results from environment variables (set by GitHub Actions)
+    nmap_results = os.getenv("NMAP_RESULTS", "No Nmap results found.")
+    nuclei_results = os.getenv("NUCLEI_RESULTS", "No Nuclei results found.")
+    sqlmap_results = os.getenv("SQLMAP_RESULTS", "No SQLMap results found.")
+
+    print(f"[+] Processing scan results for: {target_url}")
+
+    try:
+        # Configure and get the model
+        model = configure_api()
+        
+        # Analyze
+        report = analyze_findings(model, target_url, nmap_results, nuclei_results, sqlmap_results)
+        
+        # Generate filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_url = target_url.replace("https://", "").replace("http://", "").replace("/", "_").replace(".", "_")
+        filename = f"report_{safe_url}_{timestamp}.md"
+        
+        # Save report
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(report)
+        
+        print(f"[+] Report saved to: {filename}")
+        print("[+] Process Complete.")
+        
+    except Exception as e:
+        print(f"[FATAL] Critical Error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    target = os.getenv("TARGET_URL")
-    if not target:
-        if len(sys.argv) < 2:
-            print("Usage: python ai_security_agent.py <target_url>")
-            sys.exit(1)
-        target = sys.argv[1]
-    
-    print(f"[+] Processing scan results for: {target}")
-    
-    # Read outputs from the workflow steps
-    nmap_out = read_file_safe("nmap_results.txt")
-    nuclei_out = read_file_safe("nuclei_results.txt")
-    sqlmap_out = read_file_safe("sqlmap_results.txt")
-    
-    # Combine findings
-    all_findings = f"""
-    === NMAP RESULTS ===
-    {nmap_out if nmap_out.strip() else "No ports scanned or no results."}
-    
-    === NUCLEI RESULTS ===
-    {nuclei_out if nuclei_out.strip() else "No vulnerabilities found by Nuclei."}
-    
-    === SQLMAP RESULTS ===
-    {sqlmap_out if sqlmap_out.strip() else "No SQL injection found or scan timed out."}
-    """
-    
-    # Check if we have ANY data
-    if not (nmap_out.strip() or nuclei_out.strip() or sqlmap_out.strip()):
-        print("[+] No data found from any scanner. Generating 'All Clear' report.")
-        report = f"""# Security Scan Report
-
-**Target:** {target}
-**Date:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-**Status:** ⚠️ **NO DATA**
-
-## Executive Summary
-The automated scanners (Nmap, Nuclei, SQLMap) did not produce any output. This could mean:
-1. The target is unreachable.
-2. The target blocked the scan (WAF/Firewall).
-3. The scan timed out.
-
-## Recommendation
-Please verify the target URL and network connectivity. Try running the scan again.
-
----
-*Generated by Hades-Sec-Bot*
-"""
-    else:
-        print("[+] Sending combined findings to AI for analysis...")
-        prompt = f"""
-        You are a senior cybersecurity analyst and penetration tester.
-        Analyze the following raw output from three security tools: Nmap, Nuclei, and SQLMap.
-        
-        RAW DATA:
-        {all_findings}
-        
-        TASK:
-        1. **Filter False Positives**: Ignore generic "info" messages or obvious false alarms. Focus on actionable vulnerabilities.
-        2. **Correlate**: If Nmap shows port 80 open and Nuclei finds a vulnerability on port 80, link them.
-        3. **Prioritize**: Rank findings by severity (Critical > High > Medium > Low).
-        4. **Format**: Create a professional Markdown report with:
-           - Executive Summary
-           - Critical/High Findings (with Proof of Concept if available)
-           - Medium/Low Findings
-           - Remediation Steps
-           - Conclusion
-        
-        If no vulnerabilities are found despite the scans, state that clearly as "No Vulnerabilities Detected".
-        """
-        
-        try:
-            response = model.generate_content(prompt)
-            report = response.text
-        except Exception as e:
-            report = f"AI Analysis Failed: {str(e)}\n\nRaw Findings:\n{all_findings}"
-
-    # Save Report
-    safe_name = target.replace(":", "_").replace("/", "_").replace("\\", "_")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"report_{safe_name}_{timestamp}.md"
-    
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(report)
-    
-    print(f"[+] Report saved to: {filename}")
-    print("\n[+] Process Complete.")
+    main()
