@@ -1,11 +1,17 @@
 services:
   - type: web
-    name: kolkata-sec-bot
-    env: python
+    name: hades-sec-bot
+    env: docker
     region: singapore
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python telegram_bot.py
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.10.12
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: REPO_OWNER
+        sync: false
+      - key: REPO_NAME
+        sync: false
+      - key: WORKFLOW_FILE
+        sync: false
