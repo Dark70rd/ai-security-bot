@@ -8,13 +8,17 @@ import os
 import sys
 from datetime import datetime
 
-# Import the Google Generative AI library
+# Import the Google Generative AI library (using new google-genai package)
 try:
-    import google.generativeai as genai
+    import google.genai as genai
 except ImportError:
-    print("[ERROR] google-generativeai package not found. Installing...")
-    os.system("pip install google-generativeai")
-    import google.generativeai as genai
+    try:
+        # Fallback to deprecated library if new one not available
+        import google.generativeai as genai
+    except ImportError:
+        print("[ERROR] google-genai package not found. Installing...")
+        os.system("pip install google-genai")
+        import google.genai as genai
 
 def configure_api():
     """Configure the API key and model."""
@@ -24,8 +28,9 @@ def configure_api():
     
     genai.configure(api_key=api_key)
     
-    # Use current stable models (2026)
-    model_name = "gemini-1.5-flash"
+    # Use current stable models (May 2026)
+    # gemini-1.5-flash does NOT exist - use gemini-2.0-flash instead
+    model_name = "gemini-2.0-flash"
     
     try:
         model = genai.GenerativeModel(model_name)
@@ -34,7 +39,7 @@ def configure_api():
     except Exception as e:
         print(f"[ERROR] Failed to initialize model '{model_name}': {e}")
         # Fallback to alternative models if primary fails
-        fallback_models = ["gemini-1.5-pro", "gemini-2.0-flash"]
+        fallback_models = ["gemini-2.0-pro", "gemini-1.5-pro"]
         for fallback in fallback_models:
             try:
                 print(f"[+] Trying fallback model: {fallback}...")
