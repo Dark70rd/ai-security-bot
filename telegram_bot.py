@@ -135,7 +135,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     logger.info("Starting Telegram Bot...")
-    # Modern v20 syntax: No Updater, just Application
+    # Using Application.builder() directly. No Updater involved.
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
