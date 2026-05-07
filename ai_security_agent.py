@@ -58,11 +58,16 @@ def analyze_findings_with_ai(findings):
     except Exception as e:
         return f"AI Analysis Failed: {str(e)}"
 
-def save_report(report_text, target_url):
+def save_report(report, target_url):
+    # Sanitize the URL to create a valid filename
+    # Replace : / \ with _ to avoid filesystem errors
+    safe_name = target_url.replace(":", "_").replace("/", "_").replace("\\", "_")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"report_{target_url.replace('/', '_')}_{timestamp}.md"
-    with open(filename, "w") as f:
-        f.write(report_text)
+    filename = f"report_{safe_name}_{timestamp}.md"
+    
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(report)
+    
     print(f"[+] Report saved to: {filename}")
     return filename
 
