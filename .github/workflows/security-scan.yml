@@ -4,13 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       target_url:
-        description: 'Target URL to scan'
+        description: 'Target URL to scan (e.g., https://testphp.vulnweb.com)'
         required: true
         default: 'https://testphp.vulnweb.com'
 
 env:
   TARGET_URL: ${{ github.event.inputs.target_url }}
   GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+  # Suppress Node.js 20 deprecation warning
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   scan-and-analyze:
@@ -66,25 +68,41 @@ jobs:
           cat nmap_results.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Run Nuclei Scan (Fixed Flags)
+      - name: Run Nuclei Scan (Fixed Connectivity & Headers)
         run: |
-          echo "[+] Running Nuclei on $TARGET_URL..."
+          echo "[+] Running Nuclei with connectivity fixes..."
           
-          # FIXED: Removed invalid -ignore-unknown-protocols flag
-          # Added -timeout 30 to prevent hanging on filtered ports
-          # Added -no-interactsh to avoid external DNS lookups (faster, more stable in CI)
-          # Added -tech-detect to identify stack even if no vulns found
+          # Extract base URL without protocol for dynamic switching
+          BASE_URL=$(echo $TARGET_URL | sed -e 's|^[^:]*://||')
           
-          nuclei -u $TARGET_URL \
+          # Try HTTP first (often less blocked than HTTPS on test sites)
+          echo "[+] Attempting scan via HTTP..."
+          nuclei -u "http://${BASE_URL}" \
             -severity critical,high,medium \
             -tags vuln,tech-detect \
             -o nuclei_results.txt \
-            -timeout 30 \
+            -timeout 60 \
+            -retries 2 \
             -no-interactsh \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
             2>&1 || true
           
-          # Check if file exists, if not create empty one to prevent GITHUB_ENV crash
-          if [ ! -f nuclei_results.txt ]; then
+          # Check if we got results. If empty or "No results", try HTTPS
+          if [ ! -s nuclei_results.txt ] || grep -q "No results found" nuclei_results.txt; then
+             echo "[+] HTTP scan empty or failed, trying HTTPS..."
+             nuclei -u "https://${BASE_URL}" \
+               -severity critical,high,medium \
+               -tags vuln,tech-detect \
+               -o nuclei_results.txt \
+               -timeout 60 \
+               -retries 2 \
+               -no-interactsh \
+               -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+               2>&1 || true
+          fi
+          
+          # Ensure file exists
+          if [ ! -f nuclei_results.txt ]; then 
             echo "No Nuclei results file created. Creating empty placeholder."
             touch nuclei_results.txt
           fi
@@ -97,28 +115,40 @@ jobs:
           cat nuclei_results.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Run SQLMap Scan (Optimized & Safe)
+      - name: Run SQLMap Scan (Fixed Connectivity & Random Agent)
         run: |
-          echo "[+] Running SQLMap on $TARGET_URL..."
+          echo "[+] Running SQLMap with connectivity fixes..."
           
-          # Optimized flags for speed and stability
-          # --level=2: Moderate depth (faster than 3)
-          # --risk=1: Low risk (fewer aggressive tests)
-          # --crawl=1: Quick crawl to find more URLs
-          # --timeout=15: Fail fast on hanging requests
-          # --batch: Non-interactive
-          
+          BASE_URL=$(echo $TARGET_URL | sed -e 's|^[^:]*://||')
           SQLMAP_OUTPUT="/tmp/sqlmap_raw_output.txt"
           
-          # Run with 300s timeout, but capture output safely
-          timeout 300 sqlmap -u "$TARGET_URL" \
+          # Try HTTP first
+          echo "[+] Attempting SQLMap via HTTP..."
+          timeout 300 sqlmap -u "http://${BASE_URL}" \
             --batch \
             --level=2 \
             --risk=1 \
             --crawl=1 \
-            --timeout=15 \
+            --timeout=20 \
+            --random-agent \
+            --delay=2 \
             --output-dir=/tmp/sqlmap_output \
             > "$SQLMAP_OUTPUT" 2>&1 || true
+          
+          # Check if we got meaningful output (looking for "testing parameters" or similar)
+          if ! grep -q "testing parameters\|injectable\|GET parameter" "$SQLMAP_OUTPUT" 2>/dev/null; then
+             echo "[+] HTTP scan failed or found nothing, trying HTTPS..."
+             timeout 300 sqlmap -u "https://${BASE_URL}" \
+               --batch \
+               --level=2 \
+               --risk=1 \
+               --crawl=1 \
+               --timeout=20 \
+               --random-agent \
+               --delay=2 \
+               --output-dir=/tmp/sqlmap_output \
+               > "$SQLMAP_OUTPUT" 2>&1 || true
+          fi
           
           # Ensure we always write to GITHUB_ENV
           if [ -s "$SQLMAP_OUTPUT" ]; then
@@ -132,7 +162,7 @@ jobs:
           else
             echo "No SQLMap results found or scan timed out."
             echo "SQLMAP_RESULTS<<EOF" >> $GITHUB_ENV
-            echo "Scan timed out or produced no output." >> $GITHUB_ENV
+            echo "Scan failed to connect or produced no output." >> $GITHUB_ENV
             echo "EOF" >> $GITHUB_ENV
           fi
 
