@@ -6,12 +6,9 @@ Analyzes raw scan results from Nmap, Nuclei, and SQLMap using Google Gemini.
 
 import os
 import sys
-import json
 from datetime import datetime
 
 # Import the Google Generative AI library
-# Note: Even though google.generativeai is deprecated, it is the package installed in the workflow.
-# We will use it to interface with the new model names.
 try:
     import google.generativeai as genai
 except ImportError:
@@ -27,9 +24,8 @@ def configure_api():
     
     genai.configure(api_key=api_key)
     
-    # Use the latest stable model
-    # gemini-1.5-flash is fast, cost-effective, and supports large context windows
-    model_name = "gemini-1.5-flash"
+    # Updated to current 2026 stable models
+    model_name = "gemini-3.1-flash"
     
     try:
         model = genai.GenerativeModel(model_name)
@@ -37,8 +33,8 @@ def configure_api():
         return model
     except Exception as e:
         print(f"[ERROR] Failed to initialize model '{model_name}': {e}")
-        # Fallback to another model if the primary one fails
-        fallback_models = ["gemini-1.5-pro", "gemini-1.0-pro"]
+        # Fallback to the Pro version if Flash is unavailable
+        fallback_models = ["gemini-3.1-pro", "gemini-3.0-flash"]
         for fallback in fallback_models:
             try:
                 print(f"[+] Trying fallback model: {fallback}...")
@@ -54,9 +50,8 @@ def sanitize_input(text):
     """Sanitize input text to prevent prompt injection or formatting issues."""
     if not text:
         return "No data provided."
-    # Truncate extremely long inputs to stay within token limits if necessary
-    # Gemini 1.5 Flash supports up to 1M tokens, but we keep it reasonable for speed
-    max_tokens_approx = 100000 # ~100k chars roughly
+    # Gemini 3.1 supports massive context, but we truncate to 100k for performance
+    max_tokens_approx = 100000 
     if len(text) > max_tokens_approx:
         print(f"[WARN] Input truncated from {len(text)} to {max_tokens_approx} characters.")
         return text[:max_tokens_approx] + "\n... [TRUNCATED] ..."
@@ -64,6 +59,11 @@ def sanitize_input(text):
 
 def analyze_findings(model, target_url, nmap_results, nuclei_results, sqlmap_results):
     """Send scan results to the AI for analysis."""
+    
+    # Sanitize inputs BEFORE constructing the prompt
+    safe_nmap = sanitize_input(nmap_results)
+    safe_nuclei = sanitize_input(nuclei_results)
+    safe_sqlmap = sanitize_input(sqlmap_results)
     
     prompt = f"""
     You are an expert Cybersecurity Analyst. Your task is to analyze the provided security scan results 
@@ -74,20 +74,16 @@ def analyze_findings(model, target_url, nmap_results, nuclei_results, sqlmap_res
     2. Nuclei (Vulnerability Scanning)
     3. SQLMap (SQL Injection Testing)
     
-    Below are the raw outputs. Some scans may have failed to connect or found no vulnerabilities.
-    Analyze the data critically. If a scan failed due to network issues (e.g., "filtered", "connection refused"), 
-    highlight this as a potential WAF/Firewall presence or network configuration issue, not necessarily a secure system.
-    
     RAW DATA:
     ---
     [NMAP OUTPUT]
-    {nmap_results}
+    {safe_nmap}
     
     [NUCLEI OUTPUT]
-    {nuclei_results}
+    {safe_nuclei}
     
     [SQLMAP OUTPUT]
-    {sqlmap_results}
+    {safe_sqlmap}
     ---
     
     INSTRUCTIONS:
@@ -106,12 +102,7 @@ def analyze_findings(model, target_url, nmap_results, nuclei_results, sqlmap_res
     try:
         print("[+] Sending findings to AI for analysis...")
         
-        # Sanitize inputs
-        safe_nmap = sanitize_input(nmap_results)
-        safe_nuclei = sanitize_input(nuclei_results)
-        safe_sqlmap = sanitize_input(sqlmap_results)
-        
-        # Generate content
+        # Generate content using the current SDK
         response = model.generate_content(prompt)
         
         if not response or not response.text:
@@ -121,7 +112,6 @@ def analyze_findings(model, target_url, nmap_results, nuclei_results, sqlmap_res
 
     except Exception as e:
         print(f"[ERROR] AI Analysis Failed: {e}")
-        # Return a fallback error message so the workflow doesn't crash completely
         return f"""
         # Security Scan Report
         
@@ -134,8 +124,6 @@ def analyze_findings(model, target_url, nmap_results, nuclei_results, sqlmap_res
         - **Nmap:** {len(safe_nmap)} characters
         - **Nuclei:** {len(safe_nuclei)} characters
         - **SQLMap:** {len(safe_sqlmap)} characters
-        
-        Please review the raw logs manually.
         """
 
 def main():
@@ -146,7 +134,7 @@ def main():
 
     target_url = sys.argv[1]
     
-    # Retrieve results from environment variables (set by GitHub Actions)
+    # Retrieve results from environment variables
     nmap_results = os.getenv("NMAP_RESULTS", "No Nmap results found.")
     nuclei_results = os.getenv("NUCLEI_RESULTS", "No Nuclei results found.")
     sqlmap_results = os.getenv("SQLMAP_RESULTS", "No SQLMap results found.")
@@ -154,10 +142,7 @@ def main():
     print(f"[+] Processing scan results for: {target_url}")
 
     try:
-        # Configure and get the model
         model = configure_api()
-        
-        # Analyze
         report = analyze_findings(model, target_url, nmap_results, nuclei_results, sqlmap_results)
         
         # Generate filename
