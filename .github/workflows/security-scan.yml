@@ -1,4 +1,4 @@
-name: AI Security Scan (Optimized)
+name: AI Security Scan (Fixed & Robust)
 
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y wget unzip curl nmap git
           
-          # Install Nuclei
+          # Install Nuclei (v3.3.1)
           wget https://github.com/projectdiscovery/nuclei/releases/download/v3.3.1/nuclei_3.3.1_linux_amd64.zip
           unzip nuclei_3.3.1_linux_amd64.zip
           sudo mv nuclei /usr/local/bin/
@@ -45,31 +45,49 @@ jobs:
           sudo mv /tmp/sqlmap /usr/share/sqlmap
           sudo ln -sf /usr/share/sqlmap/sqlmap.py /usr/local/bin/sqlmap
 
-      - name: Run Nmap Port Scan (Fast)
+      - name: Run Nmap Port Scan (Robust)
         run: |
           echo "[+] Running Fast Nmap on $TARGET_URL..."
           HOST=$(echo $TARGET_URL | sed -n 's|^.*//\([^/:]*\).*|\1|p')
           echo "Target Host: $HOST"
           
-          # -Pn: Skip ping, -T4: Aggressive, -p 80,443: Only web ports
-          nmap -Pn -T4 -p 80,443 $HOST > nmap_results.txt 2>&1 || true
+          # -Pn: Skip ping (firewalls often block ICMP)
+          # -T4: Aggressive timing
+          # -p 80,443: Only web ports
+          # --version-intensity 1: Fast service detection
+          nmap -Pn -T4 -p 80,443 --version-intensity 1 $HOST > nmap_results.txt 2>&1 || true
           
           echo "--- Nmap Results ---"
           cat nmap_results.txt
           echo "-------------------"
           
+          # Ensure we always write to GITHUB_ENV even if nmap fails
           echo "NMAP_RESULTS<<EOF" >> $GITHUB_ENV
           cat nmap_results.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Run Nuclei Scan (Robust)
-        env:
-          GOOGLE_API_KEY: "" 
+      - name: Run Nuclei Scan (Fixed Flags)
         run: |
           echo "[+] Running Nuclei on $TARGET_URL..."
-          # Added -ignore-unknown-protocols to handle filtered ports gracefully
-          # Added -tech-detect to identify tech stack even if vulns aren't found
-          nuclei -u $TARGET_URL -severity critical,high,medium -tags vuln,tech-detect -o nuclei_results.txt -ignore-unknown-protocols 2>&1 || true
+          
+          # FIXED: Removed invalid -ignore-unknown-protocols flag
+          # Added -timeout 30 to prevent hanging on filtered ports
+          # Added -no-interactsh to avoid external DNS lookups (faster, more stable in CI)
+          # Added -tech-detect to identify stack even if no vulns found
+          
+          nuclei -u $TARGET_URL \
+            -severity critical,high,medium \
+            -tags vuln,tech-detect \
+            -o nuclei_results.txt \
+            -timeout 30 \
+            -no-interactsh \
+            2>&1 || true
+          
+          # Check if file exists, if not create empty one to prevent GITHUB_ENV crash
+          if [ ! -f nuclei_results.txt ]; then
+            echo "No Nuclei results file created. Creating empty placeholder."
+            touch nuclei_results.txt
+          fi
           
           echo "--- Nuclei Results ---"
           cat nuclei_results.txt
@@ -83,20 +101,26 @@ jobs:
         run: |
           echo "[+] Running SQLMap on $TARGET_URL..."
           
-          # Optimized flags:
-          # --level=2: Faster (default is 1, 3 is very slow)
-          # --risk=1: Less aggressive (default)
-          # --crawl=1: Find more URLs quickly
+          # Optimized flags for speed and stability
+          # --level=2: Moderate depth (faster than 3)
+          # --risk=1: Low risk (fewer aggressive tests)
+          # --crawl=1: Quick crawl to find more URLs
+          # --timeout=15: Fail fast on hanging requests
           # --batch: Non-interactive
-          # --timeout=30: Stop hanging requests faster
           
-          # Use a temporary file to capture output safely
           SQLMAP_OUTPUT="/tmp/sqlmap_raw_output.txt"
           
-          # Run with a 300s timeout, but capture exit code
-          timeout 300 sqlmap -u "$TARGET_URL" --batch --level=2 --risk=1 --crawl=1 --timeout=30 --output-dir=/tmp/sqlmap_output > "$SQLMAP_OUTPUT" 2>&1 || true
+          # Run with 300s timeout, but capture output safely
+          timeout 300 sqlmap -u "$TARGET_URL" \
+            --batch \
+            --level=2 \
+            --risk=1 \
+            --crawl=1 \
+            --timeout=15 \
+            --output-dir=/tmp/sqlmap_output \
+            > "$SQLMAP_OUTPUT" 2>&1 || true
           
-          # Check if we got results
+          # Ensure we always write to GITHUB_ENV
           if [ -s "$SQLMAP_OUTPUT" ]; then
             echo "--- SQLMap Results ---"
             cat "$SQLMAP_OUTPUT"
