@@ -52,19 +52,21 @@ jobs:
           HOST=$(echo $TARGET_URL | sed -n 's|^.*//\([^/:]*\).*|\1|p')
           echo "Target Host: $HOST"
           
-          # Run quick TCP scan on top 1000 ports
-          nmap -T4 -p- --open $HOST > nmap_results.txt 2>&1 || true
+          # FIX: Added -Pn to skip ping check (GitHub runners often block ICMP)
+          nmap -T4 -Pn -p- --open $HOST > nmap_results.txt 2>&1 || true
           cat nmap_results.txt
           echo "NMAP_RESULTS<<EOF" >> $GITHUB_ENV
           cat nmap_results.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
       - name: Run Nuclei Scan (Aggressive)
+        # FIX: Unset GOOGLE_API_KEY so Nuclei doesn't try to use it
+        env:
+          GOOGLE_API_KEY: "" 
         run: |
           echo "[+] Running Nuclei on $TARGET_URL..."
-          # Run with critical, high, medium severity and vuln tags
-          # -json output for easier parsing later if needed
-          nuclei -u $TARGET_URL -severity critical,high,medium -tags vuln -o nuclei_results.txt -json 2>&1 || true
+          # Removed -json flag (syntax changed in v3.3.1, plain text is fine for AI)
+          nuclei -u $TARGET_URL -severity critical,high,medium -tags vuln -o nuclei_results.txt 2>&1 || true
           cat nuclei_results.txt
           echo "NUCLEI_RESULTS<<EOF" >> $GITHUB_ENV
           cat nuclei_results.txt >> $GITHUB_ENV
