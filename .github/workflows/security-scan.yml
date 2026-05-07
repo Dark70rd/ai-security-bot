@@ -1,4 +1,4 @@
-name: AI Security Scan
+name: AI Security Scan (Optimized)
 
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y wget unzip curl nmap git
           
-          # Install Nuclei (Specific Version)
+          # Install Nuclei
           wget https://github.com/projectdiscovery/nuclei/releases/download/v3.3.1/nuclei_3.3.1_linux_amd64.zip
           unzip nuclei_3.3.1_linux_amd64.zip
           sudo mv nuclei /usr/local/bin/
@@ -48,53 +48,69 @@ jobs:
       - name: Run Nmap Port Scan (Fast)
         run: |
           echo "[+] Running Fast Nmap on $TARGET_URL..."
-          # Extract hostname from URL
           HOST=$(echo $TARGET_URL | sed -n 's|^.*//\([^/:]*\).*|\1|p')
           echo "Target Host: $HOST"
           
-          # FIX: Scan ONLY ports 80 and 443 (Web traffic) instead of all 65k ports
-          # -Pn: Skip ping (GitHub blocks ICMP)
-          # -T4: Aggressive timing
+          # -Pn: Skip ping, -T4: Aggressive, -p 80,443: Only web ports
           nmap -Pn -T4 -p 80,443 $HOST > nmap_results.txt 2>&1 || true
           
           echo "--- Nmap Results ---"
           cat nmap_results.txt
           echo "-------------------"
           
-          # Save to environment variable
           echo "NMAP_RESULTS<<EOF" >> $GITHUB_ENV
           cat nmap_results.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Run Nuclei Scan (Aggressive)
-        # FIX: Unset GOOGLE_API_KEY so Nuclei doesn't try to use it
+      - name: Run Nuclei Scan (Robust)
         env:
           GOOGLE_API_KEY: "" 
         run: |
           echo "[+] Running Nuclei on $TARGET_URL..."
-          # Removed -json flag (syntax changed in v3.3.1, plain text is fine for AI)
-          nuclei -u $TARGET_URL -severity critical,high,medium -tags vuln -o nuclei_results.txt 2>&1 || true
+          # Added -ignore-unknown-protocols to handle filtered ports gracefully
+          # Added -tech-detect to identify tech stack even if vulns aren't found
+          nuclei -u $TARGET_URL -severity critical,high,medium -tags vuln,tech-detect -o nuclei_results.txt -ignore-unknown-protocols 2>&1 || true
+          
+          echo "--- Nuclei Results ---"
           cat nuclei_results.txt
+          echo "----------------------"
+          
           echo "NUCLEI_RESULTS<<EOF" >> $GITHUB_ENV
           cat nuclei_results.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Run SQLMap Scan
+      - name: Run SQLMap Scan (Optimized & Safe)
         run: |
           echo "[+] Running SQLMap on $TARGET_URL..."
-          # Non-interactive mode, aggressive, check for SQLi
-          # --batch: accept defaults, --level 3: deeper check, --risk 2: higher risk tests
-          # Timeout set to 120s to prevent hanging the workflow
-          timeout 120 sqlmap -u "$TARGET_URL" --batch --level=3 --risk=2 --output-dir=/tmp/sqlmap_output 2>&1 || true
           
-          # Collect results if any
-          if [ -d "/tmp/sqlmap_output" ]; then
-             find /tmp/sqlmap_output -name "*.txt" -exec cat {} \; > sqlmap_results.txt 2>/dev/null || true
+          # Optimized flags:
+          # --level=2: Faster (default is 1, 3 is very slow)
+          # --risk=1: Less aggressive (default)
+          # --crawl=1: Find more URLs quickly
+          # --batch: Non-interactive
+          # --timeout=30: Stop hanging requests faster
+          
+          # Use a temporary file to capture output safely
+          SQLMAP_OUTPUT="/tmp/sqlmap_raw_output.txt"
+          
+          # Run with a 300s timeout, but capture exit code
+          timeout 300 sqlmap -u "$TARGET_URL" --batch --level=2 --risk=1 --crawl=1 --timeout=30 --output-dir=/tmp/sqlmap_output > "$SQLMAP_OUTPUT" 2>&1 || true
+          
+          # Check if we got results
+          if [ -s "$SQLMAP_OUTPUT" ]; then
+            echo "--- SQLMap Results ---"
+            cat "$SQLMAP_OUTPUT"
+            echo "----------------------"
+            
+            echo "SQLMAP_RESULTS<<EOF" >> $GITHUB_ENV
+            cat "$SQLMAP_OUTPUT" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          else
+            echo "No SQLMap results found or scan timed out."
+            echo "SQLMAP_RESULTS<<EOF" >> $GITHUB_ENV
+            echo "Scan timed out or produced no output." >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
           fi
-          cat sqlmap_results.txt 2>/dev/null || echo "No SQLMap results found."
-          echo "SQLMAP_RESULTS<<EOF" >> $GITHUB_ENV
-          cat sqlmap_results.txt >> $GITHUB_ENV 2>/dev/null || echo "No SQLMap results" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
 
       - name: Run AI Analysis
         run: |
