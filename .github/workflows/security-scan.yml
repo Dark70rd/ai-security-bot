@@ -45,16 +45,23 @@ jobs:
           sudo mv /tmp/sqlmap /usr/share/sqlmap
           sudo ln -sf /usr/share/sqlmap/sqlmap.py /usr/local/bin/sqlmap
 
-      - name: Run Nmap Port Scan
+      - name: Run Nmap Port Scan (Fast)
         run: |
-          echo "[+] Running Nmap on $TARGET_URL..."
+          echo "[+] Running Fast Nmap on $TARGET_URL..."
           # Extract hostname from URL
           HOST=$(echo $TARGET_URL | sed -n 's|^.*//\([^/:]*\).*|\1|p')
           echo "Target Host: $HOST"
           
-          # FIX: Added -Pn to skip ping check (GitHub runners often block ICMP)
-          nmap -T4 -Pn -p- --open $HOST > nmap_results.txt 2>&1 || true
+          # FIX: Scan ONLY ports 80 and 443 (Web traffic) instead of all 65k ports
+          # -Pn: Skip ping (GitHub blocks ICMP)
+          # -T4: Aggressive timing
+          nmap -Pn -T4 -p 80,443 $HOST > nmap_results.txt 2>&1 || true
+          
+          echo "--- Nmap Results ---"
           cat nmap_results.txt
+          echo "-------------------"
+          
+          # Save to environment variable
           echo "NMAP_RESULTS<<EOF" >> $GITHUB_ENV
           cat nmap_results.txt >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
